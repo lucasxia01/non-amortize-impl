@@ -1,0 +1,159 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index df690b96..c31f6fbd 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -3701,8 +3701,6 @@ checksum = "d231b230927b5e4ad203db57bbcbee2802f6bce620b1e4a9024a07d94e2907ec"
+ [[package]]
+ name = "plonky2"
+ version = "1.0.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "5f856aea4c9a5a8632f310cd830005e612c563391a4cdb33d34c7f523edf1dc8"
+ dependencies = [
+  "ahash",
+  "anyhow",
+diff --git a/Cargo.toml b/Cargo.toml
+index 6314afb1..b54dba0b 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -119,3 +119,6 @@ starky = "1.0.0"
+ 
+ [workspace.lints.clippy]
+ too_long_first_doc_paragraph = "allow"
++
++[patch.crates-io]
++plonky2 = { path = "vendor/plonky2" }
+diff --git a/evm_arithmetization/src/prover.rs b/evm_arithmetization/src/prover.rs
+index 41007d61..8a20ac9f 100644
+--- a/evm_arithmetization/src/prover.rs
++++ b/evm_arithmetization/src/prover.rs
+@@ -45,14 +45,18 @@ where
+     // Sanity check on the provided config
+     assert_eq!(DEFAULT_CAP_LEN, 1 << config.fri_config.cap_height);
+ 
++    let __ks = plonky2::hash::keccak::keccak_stats::snapshot(); let __tw = std::time::Instant::now();
+     timed!(timing, "build kernel", Lazy::force(&KERNEL));
+ 
++    eprintln!("PHASE_WALL: kernel {:.4}", __tw.elapsed().as_secs_f64()); plonky2::hash::keccak::keccak_stats::report_phase("kernel", &__ks);
++    let __ks = plonky2::hash::keccak::keccak_stats::snapshot(); let __tw = std::time::Instant::now();
+     let mut tables_with_pvs = timed!(
+         timing,
+         "generate all traces",
+         generate_traces(all_stark, &inputs, config, segment_data, timing)?
+     );
+ 
++    eprintln!("PHASE_WALL: traces {:.4}", __tw.elapsed().as_secs_f64()); plonky2::hash::keccak::keccak_stats::report_phase("traces", &__ks);
+     check_abort_signal(abort_signal.clone())?;
+ 
+     let proof = prove_with_traces(
+@@ -87,6 +91,7 @@ where
+ 
+     // For each STARK, we compute the polynomial commitments for the polynomials
+     // interpolating its trace.
++    let __ks = plonky2::hash::keccak::keccak_stats::snapshot(); let __tw = std::time::Instant::now();
+     let trace_commitments = timed!(
+         timing,
+         "compute all trace commitments",
+@@ -129,8 +134,10 @@ where
+     observe_public_values::<F, C, D>(&mut challenger, public_values)
+         .map_err(|_| anyhow::Error::msg("Invalid conversion of public values."))?;
+ 
++    eprintln!("PHASE_WALL: trace_commitments {:.4}", __tw.elapsed().as_secs_f64()); plonky2::hash::keccak::keccak_stats::report_phase("trace_commitments", &__ks);
+     // For each STARK, compute its cross-table lookup Z polynomials and get the
+     // associated `CtlData`.
++    let __ks = plonky2::hash::keccak::keccak_stats::snapshot(); let __tw = std::time::Instant::now();
+     let (ctl_challenges, ctl_data_per_table) = timed!(
+         timing,
+         "compute CTL data",
+@@ -143,6 +150,8 @@ where
+         )
+     );
+ 
++    eprintln!("PHASE_WALL: ctl {:.4}", __tw.elapsed().as_secs_f64()); plonky2::hash::keccak::keccak_stats::report_phase("ctl", &__ks);
++    let __ks = plonky2::hash::keccak::keccak_stats::snapshot(); let __tw = std::time::Instant::now();
+     let (stark_proofs, mem_before_cap, mem_after_cap) = timed!(
+         timing,
+         "compute all proofs given commitments",
+@@ -159,6 +168,7 @@ where
+             abort_signal,
+         )?
+     );
++    eprintln!("PHASE_WALL: proofs {:.4}", __tw.elapsed().as_secs_f64()); plonky2::hash::keccak::keccak_stats::report_phase("proofs", &__ks);
+     public_values.mem_before = mem_before_cap;
+     public_values.mem_after = mem_after_cap;
+ 
+diff --git a/evm_arithmetization/tests/erc20.rs b/evm_arithmetization/tests/erc20.rs
+index f594c7bd..2c41bd62 100644
+--- a/evm_arithmetization/tests/erc20.rs
++++ b/evm_arithmetization/tests/erc20.rs
+@@ -53,7 +53,23 @@ fn test_erc20() -> anyhow::Result<()> {
+     init_logger();
+ 
+     let all_stark = AllStark::<F, D>::default();
+-    let config = TEST_STARK_CONFIG;
++    let rate_bits: usize = std::env::var("ZKEVM_RATE_BITS").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
++    let arity_bits: usize = std::env::var("ZKEVM_ARITY_BITS").ok().and_then(|v| v.parse().ok()).unwrap_or(4);
++    let pow_bits: u32 = std::env::var("ZKEVM_POW_BITS").ok().and_then(|v| v.parse().ok()).unwrap_or(16);
++    let cap_height: usize = std::env::var("ZKEVM_CAP_HEIGHT").ok().and_then(|v| v.parse().ok()).unwrap_or(4);
++    let num_query_rounds = (100usize - pow_bits as usize).div_ceil(rate_bits);
++    let config = starky::config::StarkConfig {
++        security_bits: 100,
++        num_challenges: 2,
++        fri_config: plonky2::fri::FriConfig {
++            rate_bits,
++            cap_height,
++            proof_of_work_bits: pow_bits,
++            reduction_strategy: plonky2::fri::reduction_strategies::FriReductionStrategy::ConstantArityBits(arity_bits, 5),
++            num_query_rounds,
++        },
++    };
++    eprintln!("STARK CONFIG: rate_bits={rate_bits} arity_bits={arity_bits} pow={pow_bits} cap={cap_height} queries={num_query_rounds}");
+ 
+     let beneficiary = hex!("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
+     let sender = hex!("70997970C51812dc3A010C7d01b50e0d17dc79C8");
+@@ -199,6 +215,12 @@ fn test_erc20() -> anyhow::Result<()> {
+     };
+ 
+     let max_cpu_len_log = 20;
++    // Calibrate the per-call overhead of the hash timer (two Instant::now() + a thread-local update).
++    let timer_overhead_ns = { let n = 2_000_000u64; let t = std::time::Instant::now(); for _ in 0..n { let g = plonky2::hash::keccak::keccak_stats::HashTimer::start(plonky2::hash::keccak::keccak_stats::PERM, 0); std::hint::black_box(&g); } t.elapsed().as_nanos() as f64 / n as f64 };
++    let _ = plonky2::hash::keccak::keccak_stats::snapshot(); // discard calibration calls
++    eprintln!("TIMER_OVERHEAD_NS: {timer_overhead_ns:.1}");
++    let ks0 = plonky2::hash::keccak::keccak_stats::snapshot();
++    let t_prove_wall = std::time::Instant::now();
+     let mut timing = TimingTree::new("prove", log::Level::Debug);
+ 
+     let proofs = prove_all_segments::<F, C, D>(
+@@ -211,6 +233,33 @@ fn test_erc20() -> anyhow::Result<()> {
+     )?;
+ 
+     timing.filter(Duration::from_millis(100)).print();
++    let wall = t_prove_wall.elapsed().as_secs_f64();
++    let kd = plonky2::hash::keccak::keccak_stats::snapshot().diff(&ks0);
++    eprintln!("KECCAK_WORK: calls={} bytes={} hash_cpu_s={:.3} prove_wall_s={:.3} threads={} {}", kd.total_calls(), kd.bytes.iter().sum::<u64>(), kd.total_ns() as f64 * 1e-9, wall, std::env::var("RAYON_NUM_THREADS").unwrap_or_else(|_| "all".into()), kd.render());
++    let proof_bytes: usize = {
++        use plonky2::util::serialization::Write;
++        let mut total = 0usize;
++        for p in &proofs {
++            for sp in p.multi_proof.stark_proofs.iter().flatten() {
++                let pr = &sp.proof;
++                let mut buf: Vec<u8> = Vec::new();
++                buf.write_merkle_cap(&pr.trace_cap).unwrap();
++                if let Some(c) = &pr.auxiliary_polys_cap { buf.write_merkle_cap(c).unwrap(); }
++                if let Some(c) = &pr.quotient_polys_cap { buf.write_merkle_cap(c).unwrap(); }
++                let o = &pr.openings;
++                buf.write_field_ext_vec::<F, D>(&o.local_values).unwrap();
++                buf.write_field_ext_vec::<F, D>(&o.next_values).unwrap();
++                if let Some(v) = &o.auxiliary_polys { buf.write_field_ext_vec::<F, D>(v).unwrap(); }
++                if let Some(v) = &o.auxiliary_polys_next { buf.write_field_ext_vec::<F, D>(v).unwrap(); }
++                if let Some(v) = &o.ctl_zs_first { buf.write_field_vec::<F>(v).unwrap(); }
++                if let Some(v) = &o.quotient_polys { buf.write_field_ext_vec::<F, D>(v).unwrap(); }
++                buf.write_fri_proof::<F, C, D>(&pr.opening_proof).unwrap();
++                total += buf.len();
++            }
++        }
++        total
++    };
++    eprintln!("PROOF_SIZE_BYTES: {} (segments={})", proof_bytes, proofs.len());
+ 
+     verify_all_proofs(&all_stark, &proofs, &config)
+ }

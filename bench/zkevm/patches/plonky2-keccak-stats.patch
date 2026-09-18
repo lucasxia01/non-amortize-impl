@@ -1,0 +1,81 @@
+--- a/src/hash/keccak.rs	2006-07-23 21:21:28
++++ b/src/hash/keccak.rs	2026-09-18 14:33:45
+@@ -10,6 +10,54 @@
+ use crate::plonk::config::Hasher;
+ use crate::util::serialization::Write;
+ 
++
++/// Instrumentation: per-thread timing and counting of every Keccak hash call made through this
++/// hasher (Merkle leaves, Merkle nodes, challenger permutation), flushed to global counters.
++pub mod keccak_stats {
++    //! Roles by call site: `hash_no_pad` = Merkle leaf (a table row), `two_to_one` = Merkle
++    //! node compression, `permute` = challenger permutation (also used by PoW grinding).
++    use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
++    pub const ROLES: usize = 3;
++    pub const ROLE_NAMES: [&str; ROLES] = ["leaf", "node", "perm"];
++    pub static CALLS: [AtomicU64; ROLES] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
++    pub static NS: [AtomicU64; ROLES] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
++    pub static BYTES: [AtomicU64; ROLES] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
++    #[derive(Clone, Copy, Debug, Default)]
++    pub struct Local { calls: [u64; ROLES], ns: [u64; ROLES], bytes: [u64; ROLES], pending: u64 }
++    std::thread_local! { static LOCAL: core::cell::Cell<Local> = const { core::cell::Cell::new(Local { calls: [0; 3], ns: [0; 3], bytes: [0; 3], pending: 0 }) }; }
++    pub const LEAF: usize = 0; pub const NODE: usize = 1; pub const PERM: usize = 2;
++    #[derive(Debug)]
++    pub struct HashTimer { t: std::time::Instant, bytes: u64, role: usize }
++    impl HashTimer {
++        #[inline] pub fn start(role: usize, bytes: usize) -> Self { Self { t: std::time::Instant::now(), bytes: bytes as u64, role } }
++    }
++    impl Drop for HashTimer {
++        #[inline] fn drop(&mut self) {
++            let ns = self.t.elapsed().as_nanos() as u64; let r = self.role;
++            LOCAL.with(|c| {
++                let mut l = c.get(); l.calls[r] += 1; l.ns[r] += ns; l.bytes[r] += self.bytes; l.pending += 1;
++                if l.pending >= 512 { publish(&l); l = Local::default(); }
++                c.set(l);
++            });
++        }
++    }
++    fn publish(l: &Local) { for r in 0..ROLES { CALLS[r].fetch_add(l.calls[r], Relaxed); NS[r].fetch_add(l.ns[r], Relaxed); BYTES[r].fetch_add(l.bytes[r], Relaxed); } }
++    /// Flush this thread's local counters.
++    pub fn flush_local() { LOCAL.with(|c| { publish(&c.get()); c.set(Local::default()); }); }
++    /// Snapshot: per-role (calls, nanoseconds, bytes).
++    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
++    pub struct Snapshot { pub calls: [u64; ROLES], pub ns: [u64; ROLES], pub bytes: [u64; ROLES] }
++    pub fn snapshot() -> Snapshot { flush_local(); let mut s = Snapshot::default(); for r in 0..ROLES { s.calls[r] = CALLS[r].load(Relaxed); s.ns[r] = NS[r].load(Relaxed); s.bytes[r] = BYTES[r].load(Relaxed); } s }
++    impl Snapshot {
++        pub fn diff(&self, earlier: &Snapshot) -> Snapshot { let mut d = Snapshot::default(); for r in 0..ROLES { d.calls[r] = self.calls[r] - earlier.calls[r]; d.ns[r] = self.ns[r] - earlier.ns[r]; d.bytes[r] = self.bytes[r] - earlier.bytes[r]; } d }
++        pub fn total_ns(&self) -> u64 { self.ns.iter().sum() }
++        pub fn total_calls(&self) -> u64 { self.calls.iter().sum() }
++        /// One-line machine-readable rendering: `leaf=calls/ns/bytes node=... perm=...`.
++        pub fn render(&self) -> String { (0..ROLES).map(|r| format!("{}={}/{}/{}", ROLE_NAMES[r], self.calls[r], self.ns[r], self.bytes[r])).collect::<Vec<_>>().join(" ") }
++    }
++    /// Print a `KECCAK_PHASE` line for the work between `earlier` and now.
++    pub fn report_phase(name: &str, earlier: &Snapshot) -> Snapshot { let now = snapshot(); let d = now.diff(earlier); eprintln!("KECCAK_PHASE: {name} {}", d.render()); now }
++}
+ pub const SPONGE_RATE: usize = 8;
+ pub const SPONGE_CAPACITY: usize = 4;
+ pub const SPONGE_WIDTH: usize = SPONGE_RATE + SPONGE_CAPACITY;
+@@ -61,6 +109,7 @@
+     }
+ 
+     fn permute(&mut self) {
++        let _kt = keccak_stats::HashTimer::start(keccak_stats::PERM, SPONGE_WIDTH * 8);
+         let mut state_bytes = vec![0u8; SPONGE_WIDTH * size_of::<u64>()];
+         for i in 0..SPONGE_WIDTH {
+             state_bytes[i * size_of::<u64>()..(i + 1) * size_of::<u64>()]
+@@ -107,6 +156,7 @@
+     type Permutation = KeccakPermutation<F>;
+ 
+     fn hash_no_pad(input: &[F]) -> Self::Hash {
++        let _kt = keccak_stats::HashTimer::start(keccak_stats::LEAF, input.len() * 8);
+         let mut buffer = Vec::with_capacity(input.len());
+         buffer.write_field_vec(input).unwrap();
+         let mut arr = [0; N];
+@@ -116,6 +166,7 @@
+     }
+ 
+     fn two_to_one(left: Self::Hash, right: Self::Hash) -> Self::Hash {
++        let _kt = keccak_stats::HashTimer::start(keccak_stats::NODE, 64);
+         let mut v = vec![0; N * 2];
+         v[0..N].copy_from_slice(&left.0);
+         v[N..].copy_from_slice(&right.0);
