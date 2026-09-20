@@ -16,8 +16,12 @@ targeted preprocessing equals Dynark's full preprocessing at the tag row (`CHECK
 | synthetic R1CS | 262,144 | 1.099 s | 0.271 s | 70.5 s | 1.0 ms | 1.6 / 12.7 / 49.1 / 173.0 |
 | synthetic R1CS | 1,048,576 | 4.024 s | 1.070 s | 296.8 s | 1.0 ms | 1.6 / 12.6 / 49.9 / 192.6 |
 
-Batch ratio = (T x fresh) / (fresh + preprocessing + (T-1) x update) with the targeted
-preprocessing. Reading:
+Batch ratio = honest / batch, where honest = T x (measured time of one fresh proof), i.e. what T
+independent provers would spend, and batch = fresh + preprocessing + (T-1) x update, what the
+colluding batch prover spends (one fresh proof, then one update per extra tag, each verified),
+with the targeted preprocessing. The one-time, witness-independent steps (Groth16 setup and
+Dynark's updating key: 0.2-3.6 s and 11-214 s) are per circuit and public, so they are excluded;
+both are in the CSV (`t_setup_s`, `t_uk_s`). Reading:
 
 * A second tagged proof costs ~1 ms plus a one-time preprocessing of 25-50% of a proof, so the
   batch prover pays ~1.3-1.7 proofs for 2 tags, ~1.4 proofs for 16 tags, and the ratio grows
