@@ -1,0 +1,15 @@
+[package]
+name = "sumcheck-uniskip-bench"
+version = "0.1.0"
+edition = "2021"
+description = "Tagged Fiat-Shamir sumcheck with a univariate skip: how much a batch prover can share across tags"
+
+[dependencies]
+p3-field = "=0.7.0"
+p3-goldilocks = "=0.7.0"
+tiny-keccak = { version = "2.0", features = ["keccak"] }
+rand = "0.9"
+
+[profile.release]
+opt-level = 3
+debug = 1
