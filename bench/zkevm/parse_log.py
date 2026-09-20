@@ -19,7 +19,8 @@ def phase(name):
 tr_w, _ = phase('traces'); tc_w, tc_h = phase('trace_commitments'); ctl_w, _ = phase('ctl'); pr_w, pr_h = phase('proofs')
 proof = g(r'PROOF_SIZE_BYTES: (\d+)')
 timer_ns = g(r'TIMER_OVERHEAD_NS: ([\d.]+)')
+tag_mode = g(r'TAG_MODE: (\w+)', 'untagged')
 share = f"{float(hash_cpu)/(float(user)+float(sysd)):.4f}" if hash_cpu and user else ''
 row = [cfg, R, A, P, queries, T, rep, wall, user, sysd, hash_cpu, calls, nbytes,
-       *roles['leaf'], *roles['node'], *roles['perm'], tr_w, tc_w, tc_h, ctl_w, pr_w, pr_h, proof, share, timer_ns]
+       *roles['leaf'], *roles['node'], *roles['perm'], tr_w, tc_w, tc_h, ctl_w, pr_w, pr_h, proof, share, timer_ns, tag_mode]
 print(','.join(str(x) for x in row))

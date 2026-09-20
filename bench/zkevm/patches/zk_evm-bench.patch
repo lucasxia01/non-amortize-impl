@@ -1,5 +1,5 @@
 diff --git a/Cargo.lock b/Cargo.lock
-index df690b96..c31f6fbd 100644
+index df690b96..42a0bf00 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
 @@ -3701,8 +3701,6 @@ checksum = "d231b230927b5e4ad203db57bbcbee2802f6bce620b1e4a9024a07d94e2907ec"
@@ -11,6 +11,14 @@ index df690b96..c31f6fbd 100644
  dependencies = [
   "ahash",
   "anyhow",
+@@ -3719,6 +3717,7 @@ dependencies = [
+  "rand_chacha",
+  "serde",
+  "static_assertions",
++ "tiny-keccak",
+  "unroll",
+  "web-time",
+ ]
 diff --git a/Cargo.toml b/Cargo.toml
 index 6314afb1..b54dba0b 100644
 --- a/Cargo.toml
@@ -82,10 +90,25 @@ index 41007d61..8a20ac9f 100644
      public_values.mem_after = mem_after_cap;
  
 diff --git a/evm_arithmetization/tests/erc20.rs b/evm_arithmetization/tests/erc20.rs
-index f594c7bd..2c41bd62 100644
+index f594c7bd..0d049f95 100644
 --- a/evm_arithmetization/tests/erc20.rs
 +++ b/evm_arithmetization/tests/erc20.rs
-@@ -53,7 +53,23 @@ fn test_erc20() -> anyhow::Result<()> {
+@@ -11,11 +11,13 @@ use evm_arithmetization::prover::testing::prove_all_segments;
+ use evm_arithmetization::testing_utils::{
+     beacon_roots_account_nibbles, beacon_roots_contract_from_storage, create_account_storage,
+     init_logger, preinitialized_state_and_storage_tries, sd2u, update_beacon_roots_account_storage,
+-    TEST_STARK_CONFIG,
++
+ };
+ use evm_arithmetization::verifier::testing::verify_all_proofs;
+ use evm_arithmetization::{AllStark, Node, EMPTY_CONSOLIDATED_BLOCKHASH};
+ use hex_literal::hex;
++use rand::{Rng, SeedableRng};
++use rand_chacha::ChaCha8Rng;
+ use keccak_hash::keccak;
+ use mpt_trie::nibbles::Nibbles;
+ use mpt_trie::partial_trie::{HashedPartialTrie, PartialTrie};
+@@ -53,7 +55,23 @@ fn test_erc20() -> anyhow::Result<()> {
      init_logger();
  
      let all_stark = AllStark::<F, D>::default();
@@ -110,7 +133,7 @@ index f594c7bd..2c41bd62 100644
  
      let beneficiary = hex!("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
      let sender = hex!("70997970C51812dc3A010C7d01b50e0d17dc79C8");
-@@ -199,6 +215,12 @@ fn test_erc20() -> anyhow::Result<()> {
+@@ -199,6 +217,25 @@ fn test_erc20() -> anyhow::Result<()> {
      };
  
      let max_cpu_len_log = 20;
@@ -118,15 +141,29 @@ index f594c7bd..2c41bd62 100644
 +    let timer_overhead_ns = { let n = 2_000_000u64; let t = std::time::Instant::now(); for _ in 0..n { let g = plonky2::hash::keccak::keccak_stats::HashTimer::start(plonky2::hash::keccak::keccak_stats::PERM, 0); std::hint::black_box(&g); } t.elapsed().as_nanos() as f64 / n as f64 };
 +    let _ = plonky2::hash::keccak::keccak_stats::snapshot(); // discard calibration calls
 +    eprintln!("TIMER_OVERHEAD_NS: {timer_overhead_ns:.1}");
++    {
++        use plonky2::hash::keccak::tagged;
++        // Midstate tagging must equal the literal prefix construction, bit for bit.
++        if let Some(tag) = tagged::current_tag() {
++            let mut rng = ChaCha8Rng::seed_from_u64(7);
++            for len in [0usize, 1, 8, 31, 32, 64, 96, 103, 104, 105, 136, 137, 271, 272, 1000, 4096] {
++                let input: Vec<u8> = (0..len).map(|_| rng.gen()).collect();
++                assert_eq!(tagged::keccak256(&input), tagged::keccak256_naive_prefix(&tag, &input), "midstate != naive prefix at len {len}");
++            }
++            let _ = tagged::take_dump();
++            eprintln!("TAG_MODE: tagged tag={}", hex::encode(tag));
++        } else { eprintln!("TAG_MODE: untagged"); }
++    }
 +    let ks0 = plonky2::hash::keccak::keccak_stats::snapshot();
 +    let t_prove_wall = std::time::Instant::now();
      let mut timing = TimingTree::new("prove", log::Level::Debug);
  
      let proofs = prove_all_segments::<F, C, D>(
-@@ -211,6 +233,33 @@ fn test_erc20() -> anyhow::Result<()> {
+@@ -211,7 +248,51 @@ fn test_erc20() -> anyhow::Result<()> {
      )?;
  
      timing.filter(Duration::from_millis(100)).print();
+-
 +    let wall = t_prove_wall.elapsed().as_secs_f64();
 +    let kd = plonky2::hash::keccak::keccak_stats::snapshot().diff(&ks0);
 +    eprintln!("KECCAK_WORK: calls={} bytes={} hash_cpu_s={:.3} prove_wall_s={:.3} threads={} {}", kd.total_calls(), kd.bytes.iter().sum::<u64>(), kd.total_ns() as f64 * 1e-9, wall, std::env::var("RAYON_NUM_THREADS").unwrap_or_else(|_| "all".into()), kd.render());
@@ -154,6 +191,24 @@ index f594c7bd..2c41bd62 100644
 +        total
 +    };
 +    eprintln!("PROOF_SIZE_BYTES: {} (segments={})", proof_bytes, proofs.len());
- 
++
++    {
++        use plonky2::hash::keccak::tagged;
++        if let Some(tag) = tagged::current_tag() {
++            let mut other = tag; other[0] ^= 1;
++            tagged::set_tag(Some(other));
++            let r = verify_all_proofs(&all_stark, &proofs, &config);
++            tagged::set_tag(Some(tag));
++            assert!(r.is_err(), "proof verified under a different tag");
++            eprintln!("TAG_CHECK: verification under a different tag rejected");
++        }
++        if let Ok(path) = std::env::var("ZKEVM_HASH_DUMP") {
++            let mut d = tagged::take_dump(); d.sort_unstable();
++            let bytes: Vec<u8> = d.iter().flat_map(|x| x.to_le_bytes()).collect();
++            std::fs::write(&path, &bytes).unwrap();
++            eprintln!("HASH_DUMP: {} digests -> {path}", d.len());
++        }
++    }
      verify_all_proofs(&all_stark, &proofs, &config)
  }
+ 

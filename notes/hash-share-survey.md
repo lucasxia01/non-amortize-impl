@@ -90,7 +90,30 @@ Levers: rate is the honest one (more Merkle leaves per unit of field work, small
 arity is irrelevant; PoW bits are free up to ~20 and dominate the prover at 24 (2^24 Keccak per
 STARK x 10 STARKs, grinding is then ~90% of all hashing). Recommended headline: rate 1/8, 20 PoW.
 
-## Recommended headline configuration
+## Tagged prover (the non-amortizable construction on the zkEVM)
+
+Every Keccak call in the Plonky2 hasher (Merkle leaves, node compressions, challenger
+permutations and therefore PoW grinding) becomes `Keccak256(tag || 0^104 || input)`, implemented
+by cloning the sponge state after absorbing the tag block ("midstate", `ZKEVM_TAG=<hex>`).
+Verified: midstate == literal one-pass prefix at 16 lengths across block boundaries; a tagged
+proof verifies under its tag and is rejected under a tag differing in one bit; digest dumps of
+two tagged runs and the untagged run (7.3M / 6.7M / 6.9M digests) share 0 outputs.
+
+Overhead, measured as ns per hash call by role (independent of the random PoW effort), ERC-20
+block, 3 reps, `results/zkevm_tagged.csv`:
+
+| Config | Threads | Mode | ns/leaf | ns/node | ns/perm | Prover CPU |
+|---|---|---|---|---|---|---|
+| rate 1/2, PoW 16 | 1 | untagged | 561 | 197 | 705 | 12.67 s |
+| rate 1/2, PoW 16 | 1 | tagged | 566 | 196 | 707 | 12.56 s |
+| rate 1/8, PoW 20 | 1 | untagged | 516 | 193 | 705 | 29.7 s (3.1M grinding perms) |
+| rate 1/8, PoW 20 | 1 | tagged | 499 | 193 | 701 | 36.2 s (12.3M grinding perms) |
+
+Per-call cost is unchanged (within +-2%): the construction is free. Total prover time differs only
+through PoW grinding, which is deterministic per transcript and therefore per tag (expected 2^20
+attempts per STARK, 10 STARKs; the two transcripts above needed 3.1M and 12.3M).
+
+
 
 Plonky3 uni-stark + Keccak-256 Merkle tree and challenger, BabyBear, a narrow synthetic AIR
 (8 columns, degree-2 transition), 2^20-2^22 rows, rate 1/8: ~56% hashing single-threaded, with

@@ -9,7 +9,7 @@ ZKEVM_REPO=https://github.com/0xPolygonZero/zk_evm.git
 ZKEVM_COMMIT=ef388619ffbd5305209519a3a5bc0396185d68ac
 PLONKY2_VER=1.0.0
 
-mkdir -p "$WORK"; cd "$WORK"
+mkdir -p "$WORK"; WORK="$(cd "$WORK" && pwd)"; cd "$WORK"
 if [ ! -d zk_evm ]; then
   git clone --filter=blob:none "$ZKEVM_REPO" zk_evm
 fi

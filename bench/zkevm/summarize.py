@@ -13,8 +13,8 @@ def ovh(r):
     v = r.get('timer_overhead_ns') or ''
     return float(v) if v else DEFAULT_OVH
 groups = collections.OrderedDict()
-for r in rows: groups.setdefault((r['config'], r['threads']), []).append(r)
-print(f"{'config':10} {'thr':>3} {'n':>2} {'wall s':>8} {'cpu s':>8} {'hash s':>8} {'hash%':>6} {'leaf%':>6} {'node%':>6} {'perm%':>6} {'shareable%':>10} {'proof MB':>8}")
+for r in rows: groups.setdefault((r['config'] + ('/tag' if r.get('tag_mode') == 'tagged' else ''), r['threads']), []).append(r)
+print(f"{'config':14} {'thr':>3} {'n':>2} {'wall s':>8} {'cpu s':>8} {'hash s':>8} {'hash%':>6} {'leaf%':>6} {'node%':>6} {'perm%':>6} {'shareable%':>10} {'proof MB':>8} {'ns/leaf':>7} {'ns/node':>7} {'ns/perm':>7} {'permM':>6}")
 for (cfg, thr), rs in groups.items():
     med = lambda k: st.median(float(r[k]) for r in rs)
     cpu = med('cpu_user_s') + med('cpu_sys_s')
@@ -24,4 +24,4 @@ for (cfg, thr), rs in groups.items():
     # shareable (tag-independent) work: trace generation + non-hash part of trace commitments,
     # meaningful for single-threaded runs where phase wall time == CPU time.
     shareable = (med('phase_traces_s') + med('phase_trace_commit_s') - (med('phase_trace_commit_hash_ns') * 1e-9 - (med('leaf_calls') + med('node_calls')) * 0.25 * ovh(rs[0]) * 1e-9)) / cpu * 100 if thr == '1' else float('nan')
-    print(f"{cfg:10} {thr:>3} {len(rs):>2} {med('wall_s'):8.2f} {cpu:8.2f} {hs:8.2f} {hs/cpu*100:6.1f} {leaf:6.1f} {node:6.1f} {perm:6.1f} {shareable:10.1f} {med('proof_bytes')/1e6:8.2f}")
+    print(f"{cfg:14} {thr:>3} {len(rs):>2} {med('wall_s'):8.2f} {cpu:8.2f} {hs:8.2f} {hs/cpu*100:6.1f} {leaf:6.1f} {node:6.1f} {perm:6.1f} {shareable:10.1f} {med('proof_bytes')/1e6:8.2f} {med('leaf_ns')/med('leaf_calls'):7.0f} {med('node_ns')/med('node_calls'):7.0f} {med('perm_ns')/med('perm_calls'):7.0f} {med('perm_calls')/1e6:6.1f}")

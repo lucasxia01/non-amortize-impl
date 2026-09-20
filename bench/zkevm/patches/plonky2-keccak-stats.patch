@@ -1,6 +1,26 @@
+--- a/Cargo.toml	1969-12-31 19:00:01
++++ b/Cargo.toml	2026-09-20 15:31:57
+@@ -129,6 +129,10 @@
+ version = "0.11.0"
+ default-features = false
+ 
++[dependencies.tiny-keccak]
++version = "2.0"
++features = ["keccak"]
++
+ [dependencies.keccak-hash]
+ version = "0.8.0"
+ default-features = false
 --- a/src/hash/keccak.rs	2006-07-23 21:21:28
-+++ b/src/hash/keccak.rs	2026-09-18 14:33:45
-@@ -10,6 +10,54 @@
++++ b/src/hash/keccak.rs	2026-09-20 15:51:03
+@@ -3,13 +3,121 @@
+ use core::mem::size_of;
+ 
+ use itertools::Itertools;
+-use keccak_hash::keccak;
+ 
+ use crate::hash::hash_types::{BytesHash, RichField};
+ use crate::hash::hashing::PlonkyPermutation;
  use crate::plonk::config::Hasher;
  use crate::util::serialization::Write;
  
@@ -52,10 +72,71 @@
 +    /// Print a `KECCAK_PHASE` line for the work between `earlier` and now.
 +    pub fn report_phase(name: &str, earlier: &Snapshot) -> Snapshot { let now = snapshot(); let d = now.diff(earlier); eprintln!("KECCAK_PHASE: {name} {}", d.render()); now }
 +}
++
++/// Tagged Keccak-256: every call computes Keccak256(tag || 0^(136-32) || input), i.e. the tag
++/// padded to one full sponge block, so it can be implemented by cloning the sponge state after
++/// absorbing that block ("midstate"): zero extra permutations per call. `ZKEVM_TAG` (hex, up to
++/// 32 bytes) enables it; unset = plain Keccak-256. `ZKEVM_HASH_DUMP=1` records the first 8 bytes
++/// of every digest for the cross-tag disjointness check.
++pub mod tagged {
++    use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
++    use std::sync::{Mutex, RwLock};
++    use tiny_keccak::{Hasher as _, Keccak};
++    pub const RATE: usize = 136;
++    pub const TAG_LEN: usize = 32;
++    struct State { tag: Option<[u8; TAG_LEN]>, midstate: Option<Keccak> }
++    /// Source of truth (rarely read: each thread caches it, keyed by `GEN`).
++    static STATE: RwLock<Option<State>> = RwLock::new(None);
++    static GEN: AtomicU64 = AtomicU64::new(1);
++    static DUMP_ON: AtomicBool = AtomicBool::new(false);
++    static DUMP: Mutex<Vec<u64>> = Mutex::new(Vec::new());
++    std::thread_local! { static CACHE: core::cell::RefCell<(u64, Option<Keccak>)> = const { core::cell::RefCell::new((0, None)) }; }
++    fn midstate_for(tag: &[u8; TAG_LEN]) -> Keccak {
++        let mut block = [0u8; RATE]; block[..TAG_LEN].copy_from_slice(tag);
++        let mut k = Keccak::v256(); k.update(&block); k
++    }
++    fn init_from_env() -> State {
++        let tag = std::env::var("ZKEVM_TAG").ok().filter(|v| !v.is_empty()).map(|hex| {
++            let mut t = [0u8; TAG_LEN];
++            let bytes: Vec<u8> = (0..hex.len() / 2).map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).expect("ZKEVM_TAG must be hex")).collect();
++            assert!(bytes.len() <= TAG_LEN, "ZKEVM_TAG longer than 32 bytes");
++            t[..bytes.len()].copy_from_slice(&bytes); t
++        });
++        if std::env::var_os("ZKEVM_HASH_DUMP").is_some() { DUMP_ON.store(true, Ordering::Relaxed); }
++        State { midstate: tag.as_ref().map(midstate_for), tag }
++    }
++    fn ensure() { if STATE.read().unwrap().is_none() { let st = init_from_env(); let mut w = STATE.write().unwrap(); if w.is_none() { *w = Some(st); } } }
++    /// Override the tag at runtime (tests); `None` = untagged.
++    pub fn set_tag(tag: Option<[u8; TAG_LEN]>) { *STATE.write().unwrap() = Some(State { midstate: tag.as_ref().map(midstate_for), tag }); GEN.fetch_add(1, Ordering::Release); }
++    pub fn current_tag() -> Option<[u8; TAG_LEN]> { ensure(); STATE.read().unwrap().as_ref().unwrap().tag }
++    #[inline]
++    pub fn keccak256(input: &[u8]) -> [u8; 32] {
++        let mut out = [0u8; 32];
++        let gen = GEN.load(Ordering::Acquire);
++        CACHE.with(|c| {
++            let mut c = c.borrow_mut();
++            if c.0 != gen { ensure(); c.1 = STATE.read().unwrap().as_ref().unwrap().midstate.clone(); c.0 = gen; }
++            match &c.1 {
++                Some(m) => { let mut k = m.clone(); k.update(input); k.finalize(&mut out); }
++                None => keccak_hash::write_keccak(input, &mut out),
++            }
++        });
++        if DUMP_ON.load(Ordering::Relaxed) { DUMP.lock().unwrap().push(u64::from_le_bytes(out[..8].try_into().unwrap())); }
++        out
++    }
++    /// Reference implementation: literally hash tag || zero padding || input in one pass.
++    pub fn keccak256_naive_prefix(tag: &[u8; TAG_LEN], input: &[u8]) -> [u8; 32] {
++        let mut block = [0u8; RATE]; block[..TAG_LEN].copy_from_slice(tag);
++        let mut k = Keccak::v256(); k.update(&block); k.update(input);
++        let mut out = [0u8; 32]; k.finalize(&mut out); out
++    }
++    /// Take the recorded digest prefixes (empty if dumping is off).
++    pub fn take_dump() -> Vec<u64> { std::mem::take(&mut *DUMP.lock().unwrap()) }
++}
  pub const SPONGE_RATE: usize = 8;
  pub const SPONGE_CAPACITY: usize = 4;
  pub const SPONGE_WIDTH: usize = SPONGE_RATE + SPONGE_CAPACITY;
-@@ -61,6 +109,7 @@
+@@ -61,6 +169,7 @@
      }
  
      fn permute(&mut self) {
@@ -63,7 +144,16 @@
          let mut state_bytes = vec![0u8; SPONGE_WIDTH * size_of::<u64>()];
          for i in 0..SPONGE_WIDTH {
              state_bytes[i * size_of::<u64>()..(i + 1) * size_of::<u64>()]
-@@ -107,6 +156,7 @@
+@@ -68,7 +177,7 @@
+         }
+ 
+         let hash_onion = core::iter::repeat_with(|| {
+-            let output = keccak(state_bytes.clone()).to_fixed_bytes();
++            let output = tagged::keccak256(&state_bytes);
+             state_bytes = output.to_vec();
+             output
+         });
+@@ -107,20 +216,22 @@
      type Permutation = KeccakPermutation<F>;
  
      fn hash_no_pad(input: &[F]) -> Self::Hash {
@@ -71,7 +161,10 @@
          let mut buffer = Vec::with_capacity(input.len());
          buffer.write_field_vec(input).unwrap();
          let mut arr = [0; N];
-@@ -116,6 +166,7 @@
+-        let hash_bytes = keccak(buffer).0;
++        let hash_bytes = tagged::keccak256(&buffer);
+         arr.copy_from_slice(&hash_bytes[..N]);
+         BytesHash(arr)
      }
  
      fn two_to_one(left: Self::Hash, right: Self::Hash) -> Self::Hash {
@@ -79,3 +172,9 @@
          let mut v = vec![0; N * 2];
          v[0..N].copy_from_slice(&left.0);
          v[N..].copy_from_slice(&right.0);
+         let mut arr = [0; N];
+-        arr.copy_from_slice(&keccak(v).0[..N]);
++        arr.copy_from_slice(&tagged::keccak256(&v)[..N]);
+         BytesHash(arr)
+     }
+ }
