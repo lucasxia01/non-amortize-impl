@@ -109,7 +109,19 @@ block, 3 reps, `results/zkevm_tagged.csv`:
 | rate 1/8, PoW 20 | 1 | untagged | 516 | 193 | 705 | 29.7 s (3.1M grinding perms) |
 | rate 1/8, PoW 20 | 1 | tagged | 499 | 193 | 701 | 36.2 s (12.3M grinding perms) |
 
-Per-call cost is unchanged (within +-2%): the construction is free. Total prover time differs only
+Per-call cost is unchanged (within +-2%): the construction is free.
+
+Precise overhead (`results/zkevm_tagged_pow0.csv`, `tests/hash_overhead.rs`): with PoW disabled the
+call sequences are identical (5,691,740 calls at rate 1/2, 29,687,464 at rate 1/8); end to end,
+tagged is +2.0% / +1.0% CPU (5 reps, within run-to-run drift). Isolated microbenchmark (21 batches):
+
+| Operation | Untagged | Tagged | Ratio |
+|---|---|---|---|
+| leaf hash 8 / 24 / 31 / 64 / 256 elements | 274 / 456 / 462 / 803 / 2781 ns | 273 / 458 / 458 / 801 / 2765 ns | 0.993-1.004 |
+| node compression (64 B) | 210 ns | 210 ns | 0.998 |
+| challenger permutation (3 hashes) | 729 ns | 726 ns | 0.996 |
+
+i.e. 0% +- 0.5% per operation. Total prover time differs only
 through PoW grinding, which is deterministic per transcript and therefore per tag (expected 2^20
 attempts per STARK, 10 STARKs; the two transcripts above needed 3.1M and 12.3M).
 

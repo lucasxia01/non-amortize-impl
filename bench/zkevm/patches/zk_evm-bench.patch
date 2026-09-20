@@ -212,3 +212,66 @@ index f594c7bd..0d049f95 100644
      verify_all_proofs(&all_stark, &proofs, &config)
  }
  
+diff --git a/evm_arithmetization/tests/hash_overhead.rs b/evm_arithmetization/tests/hash_overhead.rs
+new file mode 100644
+index 00000000..bbb22750
+--- /dev/null
++++ b/evm_arithmetization/tests/hash_overhead.rs
+@@ -0,0 +1,57 @@
++//! Isolated microbenchmark of the Keccak hasher operations used by the STARK prover, tagged vs
++//! untagged. Run: `cargo test --release -p evm_arithmetization --test hash_overhead -- --nocapture`.
++use std::time::Instant;
++
++use plonky2::field::goldilocks_field::GoldilocksField as F;
++use plonky2::field::types::Field;
++use plonky2::hash::hash_types::BytesHash;
++use plonky2::hash::hashing::PlonkyPermutation;
++use plonky2::hash::keccak::{tagged, KeccakHash, KeccakPermutation};
++use plonky2::plonk::config::Hasher;
++
++fn bench<R>(label: &str, iters: usize, batches: usize, mut f: impl FnMut() -> R) -> f64 {
++    let mut samples = Vec::with_capacity(batches);
++    for _ in 0..batches {
++        let t = Instant::now();
++        for _ in 0..iters {
++            std::hint::black_box(f());
++        }
++        samples.push(t.elapsed().as_nanos() as f64 / iters as f64);
++    }
++    samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
++    let med = samples[batches / 2];
++    let lo = samples[batches / 10];
++    let hi = samples[batches - 1 - batches / 10];
++    println!("{label:44} median {med:7.1} ns/call  (p10 {lo:7.1}, p90 {hi:7.1})");
++    med
++}
++
++#[test]
++fn hash_overhead() {
++    let tag = [0x5au8; 32];
++    // Leaf sizes seen in the ERC-20 block: mean ~24-31 field elements; also a wide CPU-table row.
++    let sizes = [8usize, 24, 31, 64, 256];
++    let rows: Vec<Vec<F>> = sizes.iter().map(|&n| (0..n).map(|i| F::from_canonical_u64(i as u64 * 0x9e37_79b9)).collect()).collect();
++    let (l, r) = (BytesHash::<32>([1u8; 32]), BytesHash::<32>([2u8; 32]));
++    let mut results = Vec::new();
++    for mode in ["untagged", "tagged"] {
++        tagged::set_tag(if mode == "tagged" { Some(tag) } else { None });
++        println!("== {mode}");
++        for (n, row) in sizes.iter().zip(&rows) {
++            let m = bench(&format!("{mode} hash_no_pad {n} elems ({} B)", n * 8), 200_000, 21, || <KeccakHash<32> as Hasher<F>>::hash_no_pad(row));
++            results.push((mode, format!("leaf {n}"), m));
++        }
++        let m = bench(&format!("{mode} two_to_one (64 B)"), 500_000, 21, || <KeccakHash<32> as Hasher<F>>::two_to_one(l, r));
++        results.push((mode, "node".to_string(), m));
++        let mut perm = KeccakPermutation::<F>::new((0..12).map(|i| F::from_canonical_u64(i)));
++        let m = bench(&format!("{mode} permute (96 B x3)"), 100_000, 21, || { perm.permute(); perm.as_ref()[0] });
++        results.push((mode, "perm".to_string(), m));
++    }
++    println!("== overhead (tagged / untagged)");
++    let n = results.len() / 2;
++    for i in 0..n {
++        let (_, op, u) = &results[i]; let (_, _, t) = &results[i + n];
++        println!("{op:12} untagged {u:7.1}  tagged {t:7.1}  ratio {:.3}  (+{:.1} ns)", t / u, t - u);
++    }
++    tagged::set_tag(None);
++}

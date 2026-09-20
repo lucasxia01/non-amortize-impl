@@ -58,4 +58,7 @@ for t in "" 00..01 deadbeef..; do ZKEVM_TAG=$t ZKEVM_HASH_DUMP=$D/dump_${t:0:8}.
   ZKEVM_RATE_BITS=1 ZKEVM_ARITY_BITS=4 ZKEVM_POW_BITS=16 $B --nocapture --test-threads=1; done
 python3 bench/zkevm/check_tags.py $D/dump_*.bin
 ZKEVM_TAG=deadbeef OUT=results/zkevm_tagged.csv CONFIGS="3:1:20" bench/zkevm/run.sh   # overhead
+# precise overhead: PoW off (identical call sequences) and the isolated microbenchmark
+for t in "" deadbeef; do ZKEVM_TAG=$t OUT=results/zkevm_tagged_pow0.csv CONFIGS="1:4:0 3:1:0" THREADS=1 REPS=5 bench/zkevm/run.sh; done
+(cd bench/zkevm/work/zk_evm && cargo test --release -p evm_arithmetization --test hash_overhead -- --nocapture)
 ```
