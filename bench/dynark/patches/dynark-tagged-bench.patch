@@ -1,0 +1,253 @@
+diff --git a/ark-groth16/examples/tagged_bench.rs b/ark-groth16/examples/tagged_bench.rs
+new file mode 100644
+index 0000000..10895d1
+--- /dev/null
++++ b/ark-groth16/examples/tagged_bench.rs
+@@ -0,0 +1,180 @@
++//! Toy tagged Groth16: the tag is public input #1 bound by one constraint `tag * 0 = 0`.
++//! Measures how a batch prover amortizes across T tags with Dynark's proof update.
++//!
++//! Env: CIRCUIT=sha256|synthetic  LOG_N=16 (synthetic rows)  SHA_BLOCKS=1 (preimage 64B blocks)
++//!      TAGS="2 4 16 64 256"  REPS=3  FULL_PREP=0|1  CHECK=1 (compare targeted vs full at small n)
++//!      OUT=path.csv
++use ark_bls12_381::Bls12_381;
++use ark_crypto_primitives::crh::{sha256::constraints::{Sha256Gadget, UnitVar}, CRHSchemeGadget};
++use ark_ec::pairing::Pairing;
++use ark_ff::{PrimeField, UniformRand, Zero};
++use ark_groth16::{prepare_verifying_key, Groth16};
++use ark_r1cs_std::prelude::*;
++use ark_relations::{lc, r1cs::{ConstraintMatrices, ConstraintSystem, ConstraintSystemRef, Matrix, OptimizationGoal, SynthesisError, Variable}};
++use ark_std::rand::{RngCore, SeedableRng};
++use rand_chacha::ChaCha20Rng;
++use sha2::{Digest, Sha256};
++use std::{io::Write, time::Instant};
++
++type E = Bls12_381;
++type F = <E as Pairing>::ScalarField;
++const TAG_VAR: usize = 1; // instance index of the tag (index 0 is the constant 1)
++
++fn env<T: std::str::FromStr>(k: &str, d: T) -> T { std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d) }
++
++/// Pad the constraint list so the domain (next power of two) is >= number of variables
++/// (Dynark's updating key indexes per-variable column lists by domain size).
++fn pad(m: &mut ConstraintMatrices<F>) {
++    let vars = m.num_instance_variables + m.num_witness_variables;
++    let target = m.num_constraints.max(vars).next_power_of_two();
++    while m.a.len() < target { m.a.push(vec![]); m.b.push(vec![]); m.c.push(vec![]); }
++    m.num_constraints = target;
++}
++
++/// tag * 0 = 0 as an extra row; returns the row index.
++fn add_tag_row(m: &mut ConstraintMatrices<F>) -> usize {
++    m.a.push(vec![(F::from(1u64), TAG_VAR)]); m.b.push(vec![]); m.c.push(vec![]);
++    m.a_num_non_zero += 1; m.num_constraints += 1;
++    m.num_constraints - 1
++}
++
++/// SHA-256 preimage knowledge (preimage and digest as witnesses, as in Dynark's example), with
++/// the tag allocated as the first public input. Returns (matrices, instance, witness, tag_row).
++fn sha256_circuit(blocks: usize, tag: F) -> (ConstraintMatrices<F>, Vec<F>, Vec<F>, usize) {
++    let preimage: Vec<u8> = (0..blocks * 64 - 9).map(|i| (i * 7 + 3) as u8).collect();
++    let digest = Sha256::digest(&preimage).to_vec();
++    let cs: ConstraintSystemRef<F> = ConstraintSystem::new_ref();
++    cs.set_optimization_goal(OptimizationGoal::Constraints);
++    let tag_var = cs.new_input_variable(|| Ok(tag)).unwrap();
++    let pre = UInt8::new_witness_vec(cs.clone(), &preimage).unwrap();
++    let dig = UInt8::new_witness_vec(cs.clone(), &digest).unwrap();
++    let computed = Sha256Gadget::<F>::evaluate(&UnitVar::default(), &pre).unwrap();
++    for (c, d) in computed.0.iter().zip(dig.iter()) { c.enforce_equal(d).unwrap(); }
++    // binding constraint: tag * 0 = 0
++    cs.enforce_constraint(lc!() + tag_var, lc!(), lc!()).unwrap();
++    cs.finalize();
++    assert!(cs.is_satisfied().unwrap());
++    let mut m = cs.to_matrices().unwrap();
++    let instance = cs.borrow().unwrap().instance_assignment.clone();
++    let witness = cs.borrow().unwrap().witness_assignment.clone();
++    // locate the tag row: the last constraint with a single A entry on TAG_VAR and empty B, C
++    let tag_row = (0..m.num_constraints).rev().find(|&i| m.a[i] == vec![(F::from(1u64), TAG_VAR)] && m.b[i].is_empty() && m.c[i].is_empty()).expect("tag row");
++    let _ = Variable::One;
++    pad(&mut m);
++    (m, instance, witness, tag_row)
++}
++
++/// Dynark's synthetic R1CS (rows `(k_a z_i + c_a)(k_b z_i + c_b) = z_{i+m}`) with the tag as
++/// instance #1 and one binding row. n = 2^log_n constraints.
++fn synthetic_circuit(log_n: usize, tag: F, rng: &mut ChaCha20Rng) -> (ConstraintMatrices<F>, Vec<F>, Vec<F>, usize) {
++    let n = 1usize << log_n;
++    let m = n / 2;
++    // variables: 0 = one, 1 = tag, then witness z_2 .. : we use (m-1) "x" values and (m-1) outputs
++    let num_instance = 2;
++    let num_witness = 2 * (m - 1);
++    let mut a: Matrix<F> = vec![vec![]; n]; let mut b = a.clone(); let mut c = a.clone();
++    let mut witness = vec![F::zero(); num_witness];
++    for i in 0..m - 1 {
++        let (ka, kb, ca, cb) = (F::rand(rng), F::rand(rng), F::rand(rng), F::rand(rng));
++        let x = F::rand(rng);
++        let xi = 2 + i; let yi = 2 + (m - 1) + i; // assignment indices
++        witness[xi - 2] = x; witness[yi - 2] = (x * ka + ca) * (x * kb + cb);
++        a[i] = vec![(ka, xi), (ca, 0)]; b[i] = vec![(kb, xi), (cb, 0)]; c[i] = vec![(F::from(1u64), yi)];
++    }
++    let mut mats = ConstraintMatrices { num_instance_variables: num_instance, num_witness_variables: num_witness, num_constraints: n, a_num_non_zero: 2 * (m - 1), b_num_non_zero: 2 * (m - 1), c_num_non_zero: m - 1, a, b, c };
++    // reuse the last (empty) row as the tag row
++    let tag_row = n - 1;
++    mats.a[tag_row] = vec![(F::from(1u64), TAG_VAR)]; mats.a_num_non_zero += 1;
++    (mats, vec![F::from(1u64), tag], witness, tag_row)
++}
++
++fn tag_of(i: u64) -> F { F::from_le_bytes_mod_order(&Sha256::digest(format!("tag-{i}")).to_vec()) }
++
++fn main() -> Result<(), SynthesisError> {
++    let circuit: String = env("CIRCUIT", "sha256".to_string());
++    let log_n: usize = env("LOG_N", 16);
++    let blocks: usize = env("SHA_BLOCKS", 1);
++    let tags: Vec<usize> = std::env::var("TAGS").unwrap_or("2 4 16 64 256".into()).split_whitespace().map(|s| s.parse().unwrap()).collect();
++    let reps: usize = env("REPS", 3);
++    let full_prep: bool = env::<u32>("FULL_PREP", 1) == 1;
++    let check: bool = env::<u32>("CHECK", 0) == 1;
++    let out: String = env("OUT", "results/dynark_tagged.csv".to_string());
++    let mut rng = ChaCha20Rng::seed_from_u64(42);
++
++    let t0 = tag_of(0);
++    let (matrices, instance, witness, tag_row) = if circuit == "sha256" { sha256_circuit(blocks, t0) } else { synthetic_circuit(log_n, t0, &mut rng) };
++    let n = matrices.num_constraints; let nv = matrices.num_instance_variables + matrices.num_witness_variables;
++    assert_eq!(instance[TAG_VAR], t0);
++    eprintln!("circuit={circuit} constraints(padded)={n} variables={nv} tag_row={tag_row}");
++
++    let t = Instant::now();
++    let (pk, vk, domain) = Groth16::<E>::groth16_setup_dynark(matrices.clone(), &mut rng)?;
++    let t_setup = t.elapsed().as_secs_f64();
++    let t = Instant::now();
++    let uk = Groth16::<E>::generate_updating_keys(&matrices, &domain, &pk)?;
++    let t_uk = t.elapsed().as_secs_f64();
++    let pvk = prepare_verifying_key(&vk);
++    eprintln!("setup {t_setup:.2}s, updating key {t_uk:.2}s");
++
++    // Fresh proofs (the honest per-tag cost), median of reps.
++    let mut fresh = Vec::new();
++    let mut proof0 = None; let mut cache0 = None;
++    for _ in 0..reps {
++        let t = Instant::now();
++        let (p, c) = Groth16::<E>::prove_dynark(&pk, &matrices, &instance, &witness, &mut rng)?;
++        fresh.push(t.elapsed().as_secs_f64());
++        proof0 = Some(p); cache0 = Some(c);
++    }
++    fresh.sort_by(|a, b| a.partial_cmp(b).unwrap()); let t_fresh = fresh[reps / 2];
++    let proof0 = proof0.unwrap(); let mut cache = cache0.unwrap();
++    assert!(Groth16::<E>::verify_dynark(&pvk, &proof0, &instance)?);
++    let mut other = instance.clone(); other[TAG_VAR] = tag_of(999);
++    assert!(!Groth16::<E>::verify_dynark(&pvk, &proof0, &other)?, "proof verified under a different tag: tag not bound");
++    eprintln!("fresh proof {t_fresh:.3}s (verifies under its tag, rejected under another)");
++
++    // Preprocessing: targeted (one row) and optionally Dynark's full version.
++    let t = Instant::now();
++    Groth16::<E>::process_dynark_rows(&uk, &matrices, &instance, &witness, &[tag_row], &mut cache)?;
++    let t_prep_targeted = t.elapsed().as_secs_f64();
++    let (qa_t, qb_t) = (cache.q_a[tag_row], cache.q_b[tag_row]);
++    let mut t_prep_full = f64::NAN;
++    if full_prep {
++        let mut cache_full = cache.clone();
++        let t = Instant::now();
++        Groth16::<E>::process_dynark(&uk, &matrices, &instance, &witness, &mut cache_full)?;
++        t_prep_full = t.elapsed().as_secs_f64();
++        if check { assert_eq!(cache_full.q_a[tag_row], qa_t); assert_eq!(cache_full.q_b[tag_row], qb_t); eprintln!("CHECK ok: targeted projection terms equal full preprocessing at the tag row"); }
++    }
++    eprintln!("preprocessing: targeted {t_prep_targeted:.3}s, full {t_prep_full:.3}s");
++
++    // Updates: one per additional tag, each verified under its own tag and rejected under tag 0.
++    let max_t = *tags.iter().max().unwrap();
++    let mut t_updates = Vec::with_capacity(max_t);
++    let mut t_verify = 0.0;
++    for k in 1..max_t {
++        let tk = tag_of(k as u64);
++        let t = Instant::now();
++        let pk_proof = Groth16::<E>::update_dynark_with_rng(&uk, &matrices, &[(TAG_VAR, tk - t0)], &[], &cache, &mut rng)?;
++        t_updates.push(t.elapsed().as_secs_f64());
++        let mut inst_k = instance.clone(); inst_k[TAG_VAR] = tk;
++        let t = Instant::now();
++        assert!(Groth16::<E>::verify_dynark(&pvk, &pk_proof, &inst_k)?, "updated proof for tag {k} failed to verify");
++        t_verify += t.elapsed().as_secs_f64();
++        if k < 8 { assert!(!Groth16::<E>::verify_dynark(&pvk, &pk_proof, &instance)?, "updated proof verified under tag 0"); }
++    }
++    let t_update_avg = t_updates.iter().sum::<f64>() / t_updates.len() as f64;
++    eprintln!("updates: avg {:.2} ms over {} tags (all verified under own tag; first 7 rejected under tag 0), verify avg {:.2} ms", t_update_avg * 1e3, t_updates.len(), t_verify / t_updates.len() as f64 * 1e3);
++
++    let new = !std::path::Path::new(&out).exists();
++    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&out).unwrap();
++    if new { writeln!(f, "circuit,constraints,variables,T,t_setup_s,t_uk_s,t_fresh_s,t_prep_targeted_s,t_prep_full_s,t_update_ms,honest_T_s,batch_targeted_s,batch_full_s,ratio_targeted,ratio_full").unwrap(); }
++    for &tt in &tags {
++        let upd: f64 = t_updates[..tt - 1].iter().sum();
++        let honest = t_fresh * tt as f64;
++        let bt = t_fresh + t_prep_targeted + upd;
++        let bf = t_fresh + t_prep_full + upd;
++        writeln!(f, "{circuit},{n},{nv},{tt},{t_setup:.3},{t_uk:.3},{t_fresh:.4},{t_prep_targeted:.4},{t_prep_full:.4},{:.4},{honest:.4},{bt:.4},{bf:.4},{:.3},{:.3}", t_update_avg * 1e3, honest / bt, honest / bf).unwrap();
++        eprintln!("T={tt:4}: honest {honest:8.2}s  batch(targeted) {bt:8.2}s  ratio {:6.2}   batch(full) {bf:8.2}s  ratio {:6.2}", honest / bt, honest / bf);
++    }
++    Ok(())
++}
+diff --git a/ark-groth16/src/dynark_prover.rs b/ark-groth16/src/dynark_prover.rs
+index 7200a2c..568e9b9 100644
+--- a/ark-groth16/src/dynark_prover.rs
++++ b/ark-groth16/src/dynark_prover.rs
+@@ -257,13 +257,59 @@ impl<E: Pairing, QAP: R1CSToQAP> Groth16<E, QAP> {
+         instance_update: &[(usize, E::ScalarField)],
+         witness_update: &[(usize, E::ScalarField)],
+         cache: &Cache<E>,
++    ) -> Result<Proof<E>, SynthesisError> {
++        Self::update_dynark_with_rng(uk, matrices, instance_update, witness_update, cache, &mut ark_std::test_rng())
++    }
++
++    /// Projection terms `q_a[i]`, `q_b[i]` for the given rows only (others left zero), using the
++    /// closed form of `compute_projection_quotient` restricted to one Lagrange index:
++    /// `q_a[i] = sum_j w[(i-j) mod n] a_j L_j + L_i * sum_j w[(j-i) mod n] a_j + a_i p_i`
++    /// (one size-n G1 MSM per row and vector), instead of the O(n log n) FFT convolutions over
++    /// all rows. Sufficient when every later update touches only these rows.
++    pub fn process_dynark_rows(
++        uk: &UpdatingKey<E>,
++        r1cs: &ConstraintMatrices<E::ScalarField>,
++        instance: &[E::ScalarField],
++        witness: &[E::ScalarField],
++        rows: &[usize],
++        cache: &mut Cache<E>,
++    ) -> Result<(), SynthesisError> {
++        let n = cache.domain.size();
++        let (a, b, _c) = lagrange_of_dense_vec(&r1cs, &[instance, witness].concat()).unwrap();
++        let lag_affine = E::G1::normalize_batch(&uk.lagrange_truncated);
++        let one_row = |vals: &[E::ScalarField], i: usize| -> E::G1 {
++            let scalars: Vec<<E::ScalarField as PrimeField>::BigInt> = (0..n)
++                .map(|j| (vals[j] * uk.w[(n + i - j) % n]).into_bigint())
++                .collect();
++            let msm = E::G1::msm_bigint(&lag_affine, &scalars);
++            let coeff: E::ScalarField = (0..n).map(|j| vals[j] * uk.w[(n + j - i) % n]).sum();
++            msm + uk.lagrange_truncated[i] * coeff + uk.p[i] * vals[i]
++        };
++        let mut q_a = vec![E::G1::zero(); n];
++        let mut q_b = vec![E::G1::zero(); n];
++        for &i in rows {
++            q_a[i] = one_row(&a, i);
++            q_b[i] = one_row(&b, i);
++        }
++        cache.q_a = q_a;
++        cache.q_b = q_b;
++        Ok(())
++    }
++
++    /// Same as `update_dynark` but with caller-supplied randomness for the re-randomization.
++    pub fn update_dynark_with_rng<R: Rng>(
++        uk: &UpdatingKey<E>,
++        matrices: &ConstraintMatrices<E::ScalarField>,
++        instance_update: &[(usize, E::ScalarField)],
++        witness_update: &[(usize, E::ScalarField)],
++        cache: &Cache<E>,
++        rng: &mut R,
+     ) -> Result<Proof<E>, SynthesisError> {
+         let n = cache.domain.size();
+         
+-        // println!("Instance Update & Witness Update ::: {:?} || {:?}", instance_update, witness_update);
+         let update = [&instance_update[..], &witness_update[..]].concat();
+-        let r_new = E::ScalarField::rand(&mut ark_std::test_rng());
+-        let s_new = E::ScalarField::rand(&mut ark_std::test_rng());
++        let r_new = E::ScalarField::rand(rng);
++        let s_new = E::ScalarField::rand(rng);
+         
+         let delta_g1 = uk.pk.delta_g1;
+         let delta_g2 = uk.pk.vk.delta_g2;
