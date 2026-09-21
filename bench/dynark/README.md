@@ -31,3 +31,15 @@ python3 bench/dynark/summarize.py results/dynark_tagged.csv
 ```
 
 Measured on an Apple M4 Pro (14 threads; Groth16 proving and the MSMs are multithreaded).
+
+## Groth16 MSM share (target 4)
+
+`msm_share` (same patch) times each phase of the Groth16 prover used above: R1CS evaluation on
+the assignment, the quotient FFTs, scalar conversions, and the five multi-scalar multiplications
+(quotient over powers of tau, C over the witness key, A, B in G1, B in G2). This is the
+group-based analogue of the hashing share: MSMs are the work an outsider cannot skip.
+
+```bash
+CONFIGS="sha256:1 synthetic:16" THREADS="1 14" REPS=3 bench/dynark/msm_share.sh
+python3 bench/dynark/summarize_msm.py results/groth16_msm_share.csv
+```

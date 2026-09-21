@@ -1,36 +1,30 @@
-diff --git a/ark-groth16/examples/tagged_bench.rs b/ark-groth16/examples/tagged_bench.rs
+diff --git a/ark-groth16/examples/common/mod.rs b/ark-groth16/examples/common/mod.rs
 new file mode 100644
-index 0000000..10895d1
+index 0000000..7b01e72
 --- /dev/null
-+++ b/ark-groth16/examples/tagged_bench.rs
-@@ -0,0 +1,180 @@
-+//! Toy tagged Groth16: the tag is public input #1 bound by one constraint `tag * 0 = 0`.
-+//! Measures how a batch prover amortizes across T tags with Dynark's proof update.
-+//!
-+//! Env: CIRCUIT=sha256|synthetic  LOG_N=16 (synthetic rows)  SHA_BLOCKS=1 (preimage 64B blocks)
-+//!      TAGS="2 4 16 64 256"  REPS=3  FULL_PREP=0|1  CHECK=1 (compare targeted vs full at small n)
-+//!      OUT=path.csv
++++ b/ark-groth16/examples/common/mod.rs
+@@ -0,0 +1,86 @@
++//! Circuits shared by the Dynark examples: SHA-256 preimage knowledge and Dynark's synthetic
++//! R1CS, both with the tag as public input #1 bound by `tag * 0 = 0`.
++#![allow(dead_code)]
 +use ark_bls12_381::Bls12_381;
 +use ark_crypto_primitives::crh::{sha256::constraints::{Sha256Gadget, UnitVar}, CRHSchemeGadget};
 +use ark_ec::pairing::Pairing;
 +use ark_ff::{PrimeField, UniformRand, Zero};
-+use ark_groth16::{prepare_verifying_key, Groth16};
 +use ark_r1cs_std::prelude::*;
-+use ark_relations::{lc, r1cs::{ConstraintMatrices, ConstraintSystem, ConstraintSystemRef, Matrix, OptimizationGoal, SynthesisError, Variable}};
-+use ark_std::rand::{RngCore, SeedableRng};
++use ark_relations::{lc, r1cs::{ConstraintMatrices, ConstraintSystem, ConstraintSystemRef, Matrix, OptimizationGoal, Variable}};
 +use rand_chacha::ChaCha20Rng;
 +use sha2::{Digest, Sha256};
-+use std::{io::Write, time::Instant};
 +
-+type E = Bls12_381;
-+type F = <E as Pairing>::ScalarField;
-+const TAG_VAR: usize = 1; // instance index of the tag (index 0 is the constant 1)
++pub type E = Bls12_381;
++pub type F = <E as Pairing>::ScalarField;
++pub const TAG_VAR: usize = 1; // instance index of the tag (index 0 is the constant 1)
 +
-+fn env<T: std::str::FromStr>(k: &str, d: T) -> T { std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d) }
++pub fn env<T: std::str::FromStr>(k: &str, d: T) -> T { std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d) }
 +
 +/// Pad the constraint list so the domain (next power of two) is >= number of variables
 +/// (Dynark's updating key indexes per-variable column lists by domain size).
-+fn pad(m: &mut ConstraintMatrices<F>) {
++pub fn pad(m: &mut ConstraintMatrices<F>) {
 +    let vars = m.num_instance_variables + m.num_witness_variables;
 +    let target = m.num_constraints.max(vars).next_power_of_two();
 +    while m.a.len() < target { m.a.push(vec![]); m.b.push(vec![]); m.c.push(vec![]); }
@@ -38,7 +32,7 @@ index 0000000..10895d1
 +}
 +
 +/// tag * 0 = 0 as an extra row; returns the row index.
-+fn add_tag_row(m: &mut ConstraintMatrices<F>) -> usize {
++pub fn add_tag_row(m: &mut ConstraintMatrices<F>) -> usize {
 +    m.a.push(vec![(F::from(1u64), TAG_VAR)]); m.b.push(vec![]); m.c.push(vec![]);
 +    m.a_num_non_zero += 1; m.num_constraints += 1;
 +    m.num_constraints - 1
@@ -46,7 +40,7 @@ index 0000000..10895d1
 +
 +/// SHA-256 preimage knowledge (preimage and digest as witnesses, as in Dynark's example), with
 +/// the tag allocated as the first public input. Returns (matrices, instance, witness, tag_row).
-+fn sha256_circuit(blocks: usize, tag: F) -> (ConstraintMatrices<F>, Vec<F>, Vec<F>, usize) {
++pub fn sha256_circuit(blocks: usize, tag: F) -> (ConstraintMatrices<F>, Vec<F>, Vec<F>, usize) {
 +    let preimage: Vec<u8> = (0..blocks * 64 - 9).map(|i| (i * 7 + 3) as u8).collect();
 +    let digest = Sha256::digest(&preimage).to_vec();
 +    let cs: ConstraintSystemRef<F> = ConstraintSystem::new_ref();
@@ -72,7 +66,7 @@ index 0000000..10895d1
 +
 +/// Dynark's synthetic R1CS (rows `(k_a z_i + c_a)(k_b z_i + c_b) = z_{i+m}`) with the tag as
 +/// instance #1 and one binding row. n = 2^log_n constraints.
-+fn synthetic_circuit(log_n: usize, tag: F, rng: &mut ChaCha20Rng) -> (ConstraintMatrices<F>, Vec<F>, Vec<F>, usize) {
++pub fn synthetic_circuit(log_n: usize, tag: F, rng: &mut ChaCha20Rng) -> (ConstraintMatrices<F>, Vec<F>, Vec<F>, usize) {
 +    let n = 1usize << log_n;
 +    let m = n / 2;
 +    // variables: 0 = one, 1 = tag, then witness z_2 .. : we use (m-1) "x" values and (m-1) outputs
@@ -94,7 +88,73 @@ index 0000000..10895d1
 +    (mats, vec![F::from(1u64), tag], witness, tag_row)
 +}
 +
-+fn tag_of(i: u64) -> F { F::from_le_bytes_mod_order(&Sha256::digest(format!("tag-{i}")).to_vec()) }
++pub fn tag_of(i: u64) -> F { F::from_le_bytes_mod_order(&Sha256::digest(format!("tag-{i}")).to_vec()) }
++
+diff --git a/ark-groth16/examples/msm_share.rs b/ark-groth16/examples/msm_share.rs
+new file mode 100644
+index 0000000..348892f
+--- /dev/null
++++ b/ark-groth16/examples/msm_share.rs
+@@ -0,0 +1,40 @@
++//! Group-based prover cost breakdown: what share of a Groth16 proof is multi-scalar
++//! multiplication (the analogue of hashing in a hash-based prover).
++//! Env: CIRCUIT=sha256|synthetic SHA_BLOCKS=1 LOG_N=16 REPS=3 OUT=path.csv
++mod common;
++use common::*;
++use ark_groth16::{dynark_prover::prover_stats, Groth16};
++use ark_relations::r1cs::SynthesisError;
++use ark_std::rand::SeedableRng;
++use rand_chacha::ChaCha20Rng;
++use std::{io::Write, time::Instant};
++
++fn main() -> Result<(), SynthesisError> {
++    let circuit: String = env("CIRCUIT", "sha256".to_string());
++    let log_n: usize = env("LOG_N", 16);
++    let blocks: usize = env("SHA_BLOCKS", 1);
++    let reps: usize = env("REPS", 3);
++    let out: String = env("OUT", "results/groth16_msm_share.csv".to_string());
++    let threads = std::env::var("RAYON_NUM_THREADS").unwrap_or_else(|_| "all".into());
++    let mut rng = ChaCha20Rng::seed_from_u64(42);
++    let (matrices, instance, witness, _) = if circuit == "sha256" { sha256_circuit(blocks, tag_of(0)) } else { synthetic_circuit(log_n, tag_of(0), &mut rng) };
++    let n = matrices.num_constraints; let nv = matrices.num_instance_variables + matrices.num_witness_variables;
++    let (pk, _vk, _domain) = Groth16::<E>::groth16_setup_dynark(matrices.clone(), &mut rng)?;
++    // warm-up
++    let _ = Groth16::<E>::prove_dynark(&pk, &matrices, &instance, &witness, &mut rng)?;
++    let new = !std::path::Path::new(&out).exists();
++    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&out).unwrap();
++    if new { writeln!(f, "circuit,constraints,variables,threads,rep,t_total_s,{},msm_s,msm_share", prover_stats::PHASES.iter().map(|p| format!("{p}_s")).collect::<Vec<_>>().join(",")).unwrap(); }
++    for rep in 1..=reps {
++        let s0 = prover_stats::snapshot();
++        let t = Instant::now();
++        let _ = Groth16::<E>::prove_dynark(&pk, &matrices, &instance, &witness, &mut rng)?;
++        let total = t.elapsed().as_secs_f64();
++        let d = prover_stats::diff(&prover_stats::snapshot(), &s0);
++        let secs: Vec<f64> = d.iter().map(|&x| x as f64 * 1e-9).collect();
++        let msm: f64 = secs[3..8].iter().sum();
++        eprintln!("GROTH16_PHASES: circuit={circuit} n={n} threads={threads} total={total:.4}s msm={msm:.4}s ({:.1}%) {}", 100.0 * msm / total, prover_stats::render(&d));
++        writeln!(f, "{circuit},{n},{nv},{threads},{rep},{total:.5},{},{msm:.5},{:.4}", secs.iter().map(|x| format!("{x:.5}")).collect::<Vec<_>>().join(","), msm / total).unwrap();
++    }
++    Ok(())
++}
+diff --git a/ark-groth16/examples/tagged_bench.rs b/ark-groth16/examples/tagged_bench.rs
+new file mode 100644
+index 0000000..ff717b8
+--- /dev/null
++++ b/ark-groth16/examples/tagged_bench.rs
+@@ -0,0 +1,102 @@
++//! Toy tagged Groth16: the tag is public input #1 bound by one constraint `tag * 0 = 0`.
++//! Measures how a batch prover amortizes across T tags with Dynark's proof update.
++//!
++//! Env: CIRCUIT=sha256|synthetic  LOG_N=16 (synthetic rows)  SHA_BLOCKS=1 (preimage 64B blocks)
++//!      TAGS="2 4 16 64 256"  REPS=3  FULL_PREP=0|1  CHECK=1 (compare targeted vs full at small n)
++//!      OUT=path.csv
++mod common;
++use common::*;
++use ark_groth16::{prepare_verifying_key, Groth16};
++use ark_relations::r1cs::SynthesisError;
++use ark_std::rand::SeedableRng;
++use rand_chacha::ChaCha20Rng;
++use std::{io::Write, time::Instant};
 +
 +fn main() -> Result<(), SynthesisError> {
 +    let circuit: String = env("CIRCUIT", "sha256".to_string());
@@ -185,10 +245,100 @@ index 0000000..10895d1
 +    Ok(())
 +}
 diff --git a/ark-groth16/src/dynark_prover.rs b/ark-groth16/src/dynark_prover.rs
-index 7200a2c..568e9b9 100644
+index 7200a2c..f694eb9 100644
 --- a/ark-groth16/src/dynark_prover.rs
 +++ b/ark-groth16/src/dynark_prover.rs
-@@ -257,13 +257,59 @@ impl<E: Pairing, QAP: R1CSToQAP> Groth16<E, QAP> {
+@@ -30,6 +30,20 @@ use rayon::prelude::*;
+ 
+ type D<F> = GeneralEvaluationDomain<F>;
+ 
++/// Per-phase timing of the Groth16 prover (`prove_dynark`), for the MSM-share benchmark.
++pub mod prover_stats {
++    use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
++    pub const PHASES: [&str; 9] = ["r1cs_eval", "quotient_fft", "scalar_conv", "msm_quotient", "msm_c_witness", "msm_a", "msm_b_g1", "msm_b_g2", "other"];
++    pub static NS: [AtomicU64; 9] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
++    pub fn add(i: usize, ns: u64) { NS[i].fetch_add(ns, Relaxed); }
++    pub fn snapshot() -> [u64; 9] { let mut o = [0u64; 9]; for i in 0..9 { o[i] = NS[i].load(Relaxed); } o }
++    pub fn diff(now: &[u64; 9], then: &[u64; 9]) -> [u64; 9] { let mut o = [0u64; 9]; for i in 0..9 { o[i] = now[i] - then[i]; } o }
++    pub fn render(d: &[u64; 9]) -> String { (0..9).map(|i| format!("{}={}", PHASES[i], d[i])).collect::<Vec<_>>().join(" ") }
++}
++static PROVE_SEEN: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
++macro_rules! timed_phase { ($i:expr, $e:expr) => {{ let __t = std::time::Instant::now(); let __r = $e; prover_stats::add($i, __t.elapsed().as_nanos() as u64); __r }} }
++
++
+ #[cfg(feature = "parallel")]
+ impl<E: Pairing, QAP: R1CSToQAP> Groth16<E, QAP> {
+     ///
+@@ -153,18 +167,19 @@ impl<E: Pairing, QAP: R1CSToQAP> Groth16<E, QAP> {
+             .ok_or(SynthesisError::PolynomialDegreeTooLarge)
+             .unwrap();
+ 
+-        let (a, b, c) = lagrange_of_dense_vec(&r1cs, &[instance, witness].concat()).unwrap();
++        let __t_all = std::time::Instant::now();
++        let (a, b, c) = timed_phase!(0, lagrange_of_dense_vec(&r1cs, &[instance, witness].concat()).unwrap());
+ 
+         // println!("A_Lagrange: {:?}", a);
+         // println!("B_Lagrange: {:?}", b);
+         // println!("C_Lagrange: {:?}", c);
+         
+-        let quotient = QAP::compute_quotient::<E::ScalarField, D<E::ScalarField>>(
++        let quotient = timed_phase!(1, QAP::compute_quotient::<E::ScalarField, D<E::ScalarField>>(
+             &domain,
+             a.clone(),
+             b.clone(),
+             c.clone(),
+-        )?;
++        )?);
+         
+ 
+         let r = E::ScalarField::rand(rng);
+@@ -172,10 +187,10 @@ impl<E: Pairing, QAP: R1CSToQAP> Groth16<E, QAP> {
+         // let r = E::ScalarField::zero();
+         // let s = E::ScalarField::zero();
+ 
+-        let quotient = cfg_into_iter!(quotient)
++        let quotient = timed_phase!(2, cfg_into_iter!(quotient)
+             .map(|q_i| q_i.into_bigint())
+-            .collect::<Vec<_>>();
+-        let q_g1 = E::G1::msm_bigint(&pk.tau_powers_g1, &quotient);
++            .collect::<Vec<_>>());
++        let q_g1 = timed_phase!(3, E::G1::msm_bigint(&pk.tau_powers_g1, &quotient));
+ 
+         let instance = instance
+             .iter()
+@@ -186,7 +201,7 @@ impl<E: Pairing, QAP: R1CSToQAP> Groth16<E, QAP> {
+             .map(|witness_i| witness_i.into_bigint())
+             .collect::<Vec<_>>();
+ 
+-        let t_p_witness_g1 = E::G1::msm_bigint(&pk.t_p_g1, &witness);
++        let t_p_witness_g1 = timed_phase!(4, E::G1::msm_bigint(&pk.t_p_g1, &witness));
+ 
+         let r_s_delta_g1 = pk.delta_g1 * (r * s);
+ 
+@@ -195,18 +210,19 @@ impl<E: Pairing, QAP: R1CSToQAP> Groth16<E, QAP> {
+         // Compute A in G1
+         let r_delta_g1 = pk.delta_g1.mul(r);
+         let a_g1 = r_delta_g1 +
+-            pk.vk.alpha_g1 + E::G1::msm_bigint(&pk.u_g1, &assignment);
++            pk.vk.alpha_g1 + timed_phase!(5, E::G1::msm_bigint(&pk.u_g1, &assignment));
+ 
+         // Compute B in G1
+         let s_delta_g1 = pk.delta_g1.mul(s);
+-        let b_g1 = s_delta_g1 + pk.beta_g1 + E::G1::msm_bigint(&pk.v_g1, &assignment);
++        let b_g1 = s_delta_g1 + pk.beta_g1 + timed_phase!(6, E::G1::msm_bigint(&pk.v_g1, &assignment));
+ 
+         // Compute B in G2
+         let s_delta_g2 = pk.vk.delta_g2.mul(s);
+-        let b_g2 = s_delta_g2 + pk.vk.beta_g2 + E::G2::msm_bigint(&pk.v_g2, &assignment);
++        let b_g2 = s_delta_g2 + pk.vk.beta_g2 + timed_phase!(7, E::G2::msm_bigint(&pk.v_g2, &assignment));
+ 
+         // Compute C in G1
+         let c_g1 = a_g1 * &s + b_g1 * &r - &r_s_delta_g1 + &t_p_witness_g1 + &q_g1;
++        { let total = __t_all.elapsed().as_nanos() as u64; let now: u64 = prover_stats::snapshot()[..8].iter().sum(); let before = PROVE_SEEN.swap(now, core::sync::atomic::Ordering::Relaxed); prover_stats::add(8, total.saturating_sub(now - before)); }
+ 
+         let proof = Proof {
+             a_g1: a_g1.into_affine(),
+@@ -257,13 +273,59 @@ impl<E: Pairing, QAP: R1CSToQAP> Groth16<E, QAP> {
          instance_update: &[(usize, E::ScalarField)],
          witness_update: &[(usize, E::ScalarField)],
          cache: &Cache<E>,

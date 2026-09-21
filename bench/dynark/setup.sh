@@ -14,6 +14,6 @@ git fetch -q origin "$COMMIT" || true
 git checkout -q "$COMMIT"
 git checkout -q -- . && git clean -fdq -e target
 git apply "$HERE/patches/dynark-tagged-bench.patch"
-cargo build --release --example tagged_bench 2>&1 | tail -1
+cargo build --release --example tagged_bench --example msm_share 2>&1 | tail -1
 echo "$WORK/dynark/target/release/examples/tagged_bench" > "$WORK/tagged_bench.bin"
 echo "built: $(cat "$WORK/tagged_bench.bin")"
